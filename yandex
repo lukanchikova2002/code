@@ -1,0 +1,242 @@
+```{r include = FALSE}
+library(stringr)
+library(readr)
+library(dplyr)
+library(tidytext)
+library(rJava)
+library(mallet)
+library(tidyr)
+library(stopwords)
+library(LDAvis)
+library(jsonlite)
+options(java.parameters = "-Xmx1g")
+```
+
+# Характеристика данных
+
+Данные были взяты из Деткорпуса с рассказами для детей. В качестве выбранного периода я взяла тексты 1920ых годов. Также для сравнения были взяты 2 класса, а точнее жанра: реализм и документальная литература. Текстов реализма оказалось 117, а вот в корпусе документальной литературе - 40 текстов. 
+
+```{r}
+library(stringr)
+metadata <- read.table("~/polina/metadata.tab", header = T, sep = "\t", fill = TRUE) %>%
+  select(filename, author, author_sex, title, year, genre)
+metadata$year = as.numeric(as.character(metadata$year))
+youth = metadata %>%
+  filter(year < 1930, year >= 1920)
+youth$filename = str_replace_all(youth$filename, "[0-9]+s", "")
+realism = youth %>% 
+  filter(genre == "realism") %>% 
+  select(filename)
+nonfiction = youth %>% 
+  filter(genre == "nonfiction") %>% 
+  select(filename)
+```
+
+```{r}
+youth.files <- paste("~/polina/1920s", youth$filename, sep="")
+names(youth.files) <- str_replace_all(youth$filename, "[0-9]+s", "")
+```
+
+```{r}
+youth.df <- bind_rows(lapply(youth.files, read.table, sep="\t", col.names=c("word", "lemma", "tag", "const", "var", "lda100", "lda200", "lda300"), fill=TRUE, header=FALSE, quote=""), .id="filename")
+```
+
+# Чистка и нормализация текстов
+
+На данном этапе были очищены части речи (остались только существительные, прилагательные, глаголы и наречия) и были убраны фамилии, имена и отчества. Также были убраны стоп-слова, так как они помешают раскрытию тем на последующих этапах работы.
+
+```{r, warning=FALSE}
+youth.clean <- youth.df %>%
+    mutate(f.id = ifelse(str_detect(word, "^<f"), str_extract(word, "[0-9]+"), NA)) %>%
+    fill(f.id) %>%
+    filter(!str_detect(word, "^<")) %>%
+    filter(tag %in% c("S", "V", "A", "ADV")) %>%
+    filter(!str_detect(const, "имя|фам|отч"))
+nonfiction.clean = youth.clean %>% 
+  inner_join(nonfiction)
+realism.clean = youth.clean %>% 
+  inner_join(realism)
+```
+
+```{r, warning=FALSE}
+nonfiction.texts <- nonfiction.clean %>% 
+  group_by(filename, f.id) %>%
+  summarize(text = paste(lemma, collapse=" ")) %>%
+  mutate(docid = paste(filename, f.id, sep="."))
+realism.texts <- realism.clean %>% 
+  group_by(filename, f.id) %>%
+  summarize(text = paste(lemma, collapse=" ")) %>%
+  mutate(docid = paste(filename, f.id, sep="."))
+```
+
+# Подготовка модели
+
+```{r}
+write_lines(stopwords("ru"), "stopwords.txt")
+mallet.instances.realism <- mallet.import(id.array=realism.texts$docid,
+                                  text.array=realism.texts$text,
+                                  stoplist.file = "stopwords.txt")
+mallet.instances.nonfiction <- mallet.import(id.array=nonfiction.texts$docid,
+                                  text.array=nonfiction.texts$text,
+                                  stoplist.file = "stopwords.txt")
+```
+
+# Моделирование
+
+Для данного этапа работы я выбрала метод LDA. Я провела 3 прогона модели кажого корпеса, меняя количество тем: 50, 100 и 200. Лучшей оказалась модель с 200 определяемыми темами, так она более обширно изучила корпуса. Возможно с еще большим увеличением тем, работа модели будет становится лучше и лучше, но ее анализ будет довольно тяжелым. 
+
+```{r}
+topic.model.realism <- MalletLDA(num.topics=50)
+topic.model.realism$loadDocuments(mallet.instances.realism) 
+topic.model.realism$setAlphaOptimization(20, 50)
+vocabulary.realism <- topic.model.realism$getVocabulary()
+word.freqs.realism <- mallet.word.freqs(topic.model.realism)
+topic.model.realism$train(500)
+topic.model.realism$maximize(10)
+doc.topics.realism <- mallet.doc.topics(topic.model.realism, smoothed=TRUE, normalized=TRUE)
+topic.words.realism <- mallet.topic.words(topic.model.realism, smoothed=TRUE, normalized=TRUE)
+topic.labels.realism <- mallet.topic.labels(topic.model.realism, topic.words.realism, 5)
+topic.themes.realism = data_frame(themes_50 = 1:1000)
+topic.themes.realism$themes_50 = as.character(topic.themes.realism$themes_50)
+for (k in 1:nrow(topic.words.realism)) {
+    top <- paste(mallet.top.words(topic.model.realism, topic.words.realism[k,], 30)$words,collapse=" ")
+    cat(paste(k, top, "\n"))
+}
+```
+
+```{r}
+topic.model.realism <- MalletLDA(num.topics=100)
+topic.model.realism$loadDocuments(mallet.instances.realism) 
+topic.model.realism$setAlphaOptimization(20, 50)
+vocabulary.realism <- topic.model.realism$getVocabulary()
+word.freqs.realism <- mallet.word.freqs(topic.model.realism)
+topic.model.realism$train(500)
+topic.model.realism$maximize(10)
+doc.topics.realism <- mallet.doc.topics(topic.model.realism, smoothed=TRUE, normalized=TRUE)
+topic.words.realism <- mallet.topic.words(topic.model.realism, smoothed=TRUE, normalized=TRUE)
+topic.labels.realism <- mallet.topic.labels(topic.model.realism, topic.words.realism, 5)
+topic.themes.realism = data_frame(themes_50 = 1:1000)
+topic.themes.realism$themes_50 = as.character(topic.themes.realism$themes_50)
+for (k in 1:nrow(topic.words.realism)) {
+    top <- paste(mallet.top.words(topic.model.realism, topic.words.realism[k,], 30)$words,collapse=" ")
+    cat(paste(k, top, "\n"))
+}
+```
+
+```{r}
+topic.model.realism <- MalletLDA(num.topics=200)
+topic.model.realism$loadDocuments(mallet.instances.realism) 
+topic.model.realism$setAlphaOptimization(20, 50)
+vocabulary.realism <- topic.model.realism$getVocabulary()
+word.freqs.realism <- mallet.word.freqs(topic.model.realism)
+topic.model.realism$train(500)
+topic.model.realism$maximize(10)
+doc.topics.realism <- mallet.doc.topics(topic.model.realism, smoothed=TRUE, normalized=TRUE)
+topic.words.realism <- mallet.topic.words(topic.model.realism, smoothed=TRUE, normalized=TRUE)
+topic.labels.realism <- mallet.topic.labels(topic.model.realism, topic.words.realism, 5)
+topic.themes.realism = data_frame(themes_50 = 1:1000)
+topic.themes.realism$themes_50 = as.character(topic.themes.realism$themes_50)
+for (k in 1:nrow(topic.words.realism)) {
+    top <- paste(mallet.top.words(topic.model.realism, topic.words.realism[k,], 30)$words,collapse=" ")
+    cat(paste(k, top, "\n"))
+}
+```
+
+```{r}
+topic.model.nonfiction <- MalletLDA(num.topics=50)
+topic.model.nonfiction$loadDocuments(mallet.instances.nonfiction) 
+topic.model.nonfiction$setAlphaOptimization(20, 50)
+vocabulary.nonfiction <- topic.model.nonfiction$getVocabulary()
+word.freqs.nonfiction <- mallet.word.freqs(topic.model.nonfiction)
+topic.model.nonfiction$train(500)
+topic.model.nonfiction$maximize(10)
+doc.topics.nonfiction <- mallet.doc.topics(topic.model.nonfiction, smoothed=TRUE, normalized=TRUE)
+topic.words.nonfiction <- mallet.topic.words(topic.model.nonfiction, smoothed=TRUE, normalized=TRUE)
+topic.labels.nonfiction <- mallet.topic.labels(topic.model.nonfiction, topic.words.nonfiction, 5)
+topic.themes.nonfiction = data_frame(themes_50 = 1:1000)
+topic.themes.nonfiction$themes_50 = as.character(topic.themes.nonfiction$themes_50)
+for (k in 1:nrow(topic.words.nonfiction)) {
+    top <- paste(mallet.top.words(topic.model.nonfiction, topic.words.nonfiction[k,], 30)$words,collapse=" ")
+    cat(paste(k, top, "\n"))
+}
+```
+
+```{r}
+topic.model.nonfiction <- MalletLDA(num.topics=100)
+topic.model.nonfiction$loadDocuments(mallet.instances.nonfiction) 
+topic.model.nonfiction$setAlphaOptimization(20, 50)
+vocabulary.nonfiction <- topic.model.nonfiction$getVocabulary()
+word.freqs.nonfiction <- mallet.word.freqs(topic.model.nonfiction)
+topic.model.nonfiction$train(500)
+topic.model.nonfiction$maximize(10)
+doc.topics.nonfiction <- mallet.doc.topics(topic.model.nonfiction, smoothed=TRUE, normalized=TRUE)
+topic.words.nonfiction <- mallet.topic.words(topic.model.nonfiction, smoothed=TRUE, normalized=TRUE)
+topic.labels.nonfiction <- mallet.topic.labels(topic.model.nonfiction, topic.words.nonfiction, 5)
+topic.themes.nonfiction = data_frame(themes_50 = 1:1000)
+topic.themes.nonfiction$themes_50 = as.character(topic.themes.nonfiction$themes_50)
+for (k in 1:nrow(topic.words.nonfiction)) {
+    top <- paste(mallet.top.words(topic.model.nonfiction, topic.words.nonfiction[k,], 30)$words,collapse=" ")
+    cat(paste(k, top, "\n"))
+}
+```
+
+```{r}
+topic.model.nonfiction <- MalletLDA(num.topics=200)
+topic.model.nonfiction$loadDocuments(mallet.instances.nonfiction) 
+topic.model.nonfiction$setAlphaOptimization(20, 50)
+vocabulary.nonfiction <- topic.model.nonfiction$getVocabulary()
+word.freqs.nonfiction <- mallet.word.freqs(topic.model.nonfiction)
+topic.model.nonfiction$train(500)
+topic.model.nonfiction$maximize(10)
+doc.topics.nonfiction <- mallet.doc.topics(topic.model.nonfiction, smoothed=TRUE, normalized=TRUE)
+topic.words.nonfiction <- mallet.topic.words(topic.model.nonfiction, smoothed=TRUE, normalized=TRUE)
+topic.labels.nonfiction <- mallet.topic.labels(topic.model.nonfiction, topic.words.nonfiction, 5)
+topic.themes.nonfiction = data_frame(themes_50 = 1:1000)
+topic.themes.nonfiction$themes_50 = as.character(topic.themes.nonfiction$themes_50)
+for (k in 1:nrow(topic.words.nonfiction)) {
+    top <- paste(mallet.top.words(topic.model.nonfiction, topic.words.nonfiction[k,], 30)$words,collapse=" ")
+    cat(paste(k, top, "\n"))
+}
+```
+
+# Интерактивная визуализация 
+
+```{r}
+doc.length.realism <- str_count(realism.texts$text, boundary("word"))
+doc.length.realism[doc.length.realism==0] <- 0.000001 
+
+doc.length.nonfiction <- str_count(nonfiction.texts$text, boundary("word"))
+doc.length.nonfiction[doc.length.nonfiction==0] <- 0.000001
+```
+
+```{r, warning=FALSE}
+json.realism <- createJSON(phi = topic.words.realism, theta=doc.topics.realism, doc.length=doc.length.realism, vocab=vocabulary.realism, term.frequency=word.freqs.realism$term.freq)
+serVis(json.realism, out.dir="lda200.realism", open.browser=TRUE)
+```
+
+```{r, warning=FALSE}
+json.nonfiction <- createJSON(phi = topic.words.nonfiction, theta=doc.topics.nonfiction, doc.length=doc.length.nonfiction, vocab=vocabulary.nonfiction, term.frequency=word.freqs.nonfiction$term.freq)
+serVis(json.nonfiction, out.dir="lda200.nonfiction", open.browser=TRUE)
+```
+
+![model1](https://sun9-58.userapi.com/impg/-1fl9mPmPuTTEdHQw5wcmDPRoqTVqD1RaMpCbA/QCALOVdkb_g.jpg?size=1280x595&quality=96&sign=87b3bc3a4adc7dff830739821cc7c1f2&type=album)
+
+![model2](https://sun9-68.userapi.com/impg/MAuO_4wwM0LUVt3pZCvJNM61j1V1NaLX8VXnPg/OQo6R_Gi0pA.jpg?size=1280x588&quality=96&sign=df74f06f0b45bc743afde4eb9d837bf5&type=album)
+
+# Тематическая характеристика классов
+
+- В корпусе реализма находится большее количество глаголов, что логично, так как в данных произведениях раскрываются действия героев и сюжет.
+- Документальная же литература отличилась существительными и прилагательными, так как данный вид направлен больше на описание предметов.
+- В текстах реализма я нашла много слов связанных с эмоциями. Например, "боль", "ужас" и "плохо". Также эти чувства, в основном, являются неприятным ("голод", "мучение") и довольно редко встречались слова, связанные с счастьем. Это может быть обусловлено событиями, происходившими в 20ых годах.
+- Реализм также отличился словами, связанных с насилием ("кровь", "ударять", "умирать", "дрожать" и тд). Этот пункт связан в предыдущим, но я всё равно посчитала необходимым выделить этот факт отдельно. 
+- Многие события в произведениях реализма происходили на природе, так как была выделена тема с описанем окружающей героев природы.
+- Также было удивлением для меня найти своеобразные англицизмы в словах, такие как "бэби" и "сити". Я бы хотела более подробно по возможности изучением таких примеров и причин их появления.
+- В корпусе реализма попалась тема, связанная с новшествами того времени ("машина", "аэроплан", "электрический", "рельс")
+- В документальном корпусе часто упоминались изучения в сфере географии ("север", "гора", "европеец", "джунгли")
+- Следующая тема в документальной литературе, похожа на предыдущую, но более специализирована - океанология ("акула", "подводный", "медуза")
+- Также во втором корпусе активно упоминала тема политики и термины связанные с этим ("король", "министр"). Также интересная находка: слово "королева" с тестах упоминалось больше слова "король". Я пыталась покапаться в истории и понять, почему. Но причина пока не была найдена.
+- Документальная литература также выделила тему ботаники, что странно, так как эта наука была более распространена в 17-18 веках ("тычинка", "лепесток", "соцветие")
+
+
+
+
